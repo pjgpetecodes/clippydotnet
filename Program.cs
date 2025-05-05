@@ -23,6 +23,10 @@ namespace clippydotnet
 
         // Add this method to buffer tokens and speak full sentences
         private static StringBuilder responseBuffer = new StringBuilder();
+        private static CancellationTokenSource timeoutCancellationTokenSource = new CancellationTokenSource();
+        private static bool isListeningForKeyword = false;
+
+        private static string voiceName = "en-US-BlueNeural"; // Default voice name
 
         static async Task Main(string[] args)
         {
@@ -242,7 +246,7 @@ namespace clippydotnet
                 var serviceRegion = Configuration["AzureSpeech:Region"];
 
                 var config = SpeechConfig.FromSubscription(speechKey, serviceRegion);
-                config.SpeechSynthesisVoiceName = "en-US-GuyNeural";
+                config.SpeechSynthesisVoiceName = voiceName;
 
                 using var synthesizer = new SpeechSynthesizer(config);
                 var responseText = "Ok, what would you like to chat about?";
@@ -278,7 +282,7 @@ namespace clippydotnet
                 if (result.Reason == ResultReason.RecognizedSpeech)
                 {
                     Console.WriteLine($"Recognized: {result.Text}");
-                    await hubConnection.SendAsync("SendQuery", result.Text, chatMessages);
+                    await hubConnection.SendAsync("SendQuery", "You are an AI model pretending to be the office Clippy. Respond like Clippy, and keep responses to a single paragraph. " + result.Text, chatMessages);
                 }
                 else
                 {
@@ -301,7 +305,7 @@ namespace clippydotnet
                 var serviceRegion = Configuration["AzureSpeech:Region"];
 
                 var config = SpeechConfig.FromSubscription(speechKey, serviceRegion);
-                config.SpeechSynthesisVoiceName = "en-US-GuyNeural"; // You can change the voice as needed
+                config.SpeechSynthesisVoiceName = voiceName; // You can change the voice as needed
 
                 using var synthesizer = new SpeechSynthesizer(config);
                 await synthesizer.SpeakTextAsync(message);
@@ -312,33 +316,70 @@ namespace clippydotnet
             }
         }
 
-                private static async Task BufferAndSpeakAsync(string messageToken)
+        private static async Task BufferAndSpeakAsync(string messageToken)
         {
             try
             {
                 responseBuffer.Append(messageToken);
-        
+
+                // Reset the timeout timer whenever a new token is received
+                timeoutCancellationTokenSource.Cancel();
+                timeoutCancellationTokenSource = new CancellationTokenSource();
+
                 // Use Regex to check if the buffer contains a full sentence ending with ., ?, or !
                 string bufferContent = responseBuffer.ToString();
                 var sentenceRegex = new System.Text.RegularExpressions.Regex(@"([^.?!]*[.?!])");
                 var match = sentenceRegex.Match(bufferContent);
-        
+
                 if (match.Success)
                 {
                     // Extract the full sentence
                     string fullSentence = match.Value.Trim();
-        
+
                     // Remove the spoken sentence from the buffer
                     responseBuffer.Remove(0, match.Index + match.Length);
-        
+
                     // Speak the full sentence
                     await SpeakMessageAsync(fullSentence);
+
+                    // Start the timeout task only after the speech synthesis is complete
+                    StartTimeoutTask();
+                }
+                else
+                {
+                    // If no full sentence is found, reset the timeout task
+                    StartTimeoutTask();
                 }
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Error buffering and speaking response: {ex.Message}");
             }
+        }
+
+        private static void StartTimeoutTask()
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    // Wait for 5 seconds of inactivity
+                    await Task.Delay(5000, timeoutCancellationTokenSource.Token);
+
+                    // Ensure we only call RecognizeKeywordAsync once
+                    if (!isListeningForKeyword)
+                    {
+                        isListeningForKeyword = true;
+                        Console.WriteLine("No more tokens received. Listening for the keyword again...");
+                        await RecognizeKeywordAsync();
+                        isListeningForKeyword = false;
+                    }
+                }
+                catch (TaskCanceledException)
+                {
+                    // Timeout was canceled because a new token was received
+                }
+            });
         }
 
         static void MoveToAngle(ServoMotor Servo, int Angle)
