@@ -11,6 +11,7 @@ using clippydotnet.Shared;
 using Microsoft.Extensions.Configuration;
 using Microsoft.CognitiveServices.Speech;
 using Microsoft.CognitiveServices.Speech.Audio;
+using System.Text;
 
 namespace clippydotnet
 {
@@ -19,6 +20,9 @@ namespace clippydotnet
         private static HubConnection hubConnection;
         private static List<OpenAIChatMessage> chatMessages = new List<OpenAIChatMessage>();
         private static IConfiguration Configuration;
+
+        // Add this method to buffer tokens and speak full sentences
+        private static StringBuilder responseBuffer = new StringBuilder();
 
         static async Task Main(string[] args)
         {
@@ -143,39 +147,53 @@ namespace clippydotnet
                 {
                     //Console.WriteLine($"Received message: {message} from {user} with guid {responseGuid}");
                     // Speak the received message
-                    await SpeakMessageAsync(message);
+                    //await SpeakMessageAsync(message);
 
-                    await RecognizeKeywordAsync();
+                    // Delay for 5 seconds before sending the next message
+                    //await Task.Delay(5000);
+
+                    //await RecognizeKeywordAsync();
                 });
 
                 hubConnection.On<string, string, string, bool, List<CognitiveSearchResult>>("ReceiveMessageToken", async (chatBubbleId, user, messageToken, isTemporaryResponse, sources) =>
                 {
-
-                    /*
-
-                    // Find the chat message with the supplied chatBubbleId
-                    var chatMessage = chatMessages.Where(chatMessageItem => chatMessageItem.ChatBubbleId == chatBubbleId).FirstOrDefault();
-
-                    if (chatMessage != null)
+                    try
                     {
-                        if (chatMessage.IsTemporaryResponse)
+                        // Find or create the chat message with the supplied chatBubbleId
+                        var chatMessage = chatMessages.FirstOrDefault(chatMessageItem => chatMessageItem.ChatBubbleId == chatBubbleId);
+
+                        if (chatMessage != null)
                         {
-                            chatMessage.Content = "";
-                            chatMessage.IsTemporaryResponse = false;
+                            if (chatMessage.IsTemporaryResponse)
+                            {
+                                chatMessage.Content = "";
+                                chatMessage.IsTemporaryResponse = false;
+                            }
+
+                            chatMessage.Content += messageToken;
+                        }
+                        else
+                        {
+                            chatMessages.Add(new OpenAIChatMessage
+                            {
+                                ChatBubbleId = chatBubbleId,
+                                Content = messageToken,
+                                Type = "ai",
+                                IsTemporaryResponse = isTemporaryResponse,
+                                Sources = sources
+                            });
                         }
 
-                        chatMessage.Content = chatMessage.Content + messageToken;
+                        // Stream the response messageToken to the console
+                        Console.Write(messageToken);
+
+                        // Buffer tokens until a full sentence (ending with a full stop) is formed
+                        await BufferAndSpeakAsync(messageToken);
                     }
-                    else
+                    catch (Exception ex)
                     {
-                        chatMessages.Add(new OpenAIChatMessage { ChatBubbleId = chatBubbleId, Content = messageToken, Type = "ai", IsTemporaryResponse = isTemporaryResponse, Sources = sources });
+                        Console.WriteLine($"Error processing streaming response: {ex.Message}");
                     }
-
-                    // Stream the reponse messageToken to the console
-                    Console.Write(messageToken);
-
-                    */
-
                 });
 
                 await hubConnection.StartAsync();
@@ -291,6 +309,35 @@ namespace clippydotnet
             catch (Exception ex)
             {
                 Console.WriteLine($"Error: {ex.Message}");
+            }
+        }
+
+                private static async Task BufferAndSpeakAsync(string messageToken)
+        {
+            try
+            {
+                responseBuffer.Append(messageToken);
+        
+                // Use Regex to check if the buffer contains a full sentence ending with ., ?, or !
+                string bufferContent = responseBuffer.ToString();
+                var sentenceRegex = new System.Text.RegularExpressions.Regex(@"([^.?!]*[.?!])");
+                var match = sentenceRegex.Match(bufferContent);
+        
+                if (match.Success)
+                {
+                    // Extract the full sentence
+                    string fullSentence = match.Value.Trim();
+        
+                    // Remove the spoken sentence from the buffer
+                    responseBuffer.Remove(0, match.Index + match.Length);
+        
+                    // Speak the full sentence
+                    await SpeakMessageAsync(fullSentence);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error buffering and speaking response: {ex.Message}");
             }
         }
 
