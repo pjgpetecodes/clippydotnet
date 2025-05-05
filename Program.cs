@@ -9,6 +9,8 @@ using System.Net.Http;
 using Microsoft.Identity.Client;
 using clippydotnet.Shared;
 using Microsoft.Extensions.Configuration;
+using Microsoft.CognitiveServices.Speech;
+using Microsoft.CognitiveServices.Speech.Audio;
 
 namespace clippydotnet
 {
@@ -21,6 +23,37 @@ namespace clippydotnet
         static async Task Main(string[] args)
         {
             Console.WriteLine("Hello World!");
+
+            // Acquire an access token using MSAL (Client Credentials Flow)
+
+            // Load configuration from appsettings.json
+            var builder = new ConfigurationBuilder()
+                .SetBasePath(AppContext.BaseDirectory)
+                .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true);
+            Configuration = builder.Build();
+
+            await InitiliaseSignalR();
+
+            await RecognizeKeywordAsync();
+
+            // Keep the program running in a loop
+            while (true)
+            {
+                try
+                {
+                    // Start keyword recognition
+                    //await RecognizeKeywordAsync();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error in main loop: {ex.Message}");
+                }
+            }
+
+        }
+
+        private static async Task InitiliaseSignalR()
+        {
 
             using PwmChannel pwmChannel1 = PwmChannel.Create(0, 0, 50);
             using ServoMotor servoMotor1 = new ServoMotor(pwmChannel1, 180, 700, 2400);
@@ -35,20 +68,12 @@ namespace clippydotnet
             servoMotor2.Start();
             servoMotor3.Start();
 
-            // Acquire an access token using MSAL (Client Credentials Flow)
-
-            // Load configuration from appsettings.json
-            var builder = new ConfigurationBuilder()
-                .SetBasePath(AppContext.BaseDirectory)
-                .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true);
-            Configuration = builder.Build();
-
             // Retrieve Azure AD settings
             var clientId = Configuration["AzureAd:ClientId"];
             var clientSecret = Configuration["AzureAd:ClientSecret"];
             var tenantId = Configuration["AzureAd:TenantId"];
             var appIdUri = Configuration["AzureAd:AppIdUri"];
-            
+
             // Use the settings in your MSAL configuration
             var clientApp = ConfidentialClientApplicationBuilder.Create(clientId)
                 .WithClientSecret(clientSecret)
@@ -56,7 +81,7 @@ namespace clippydotnet
                 .Build();
 
             var scopes = new[] { $"{appIdUri}/.default" };
-            
+
             AuthenticationResult authResult = null;
 
             try
@@ -117,10 +142,17 @@ namespace clippydotnet
                 hubConnection.On<string, string, string>("ReceiveMessage", async (responseGuid, user, message) =>
                 {
                     //Console.WriteLine($"Received message: {message} from {user} with guid {responseGuid}");
+                    // Speak the received message
+                    await SpeakMessageAsync(message);
+
+                    await RecognizeKeywordAsync();
                 });
 
                 hubConnection.On<string, string, string, bool, List<CognitiveSearchResult>>("ReceiveMessageToken", async (chatBubbleId, user, messageToken, isTemporaryResponse, sources) =>
                 {
+
+                    /*
+
                     // Find the chat message with the supplied chatBubbleId
                     var chatMessage = chatMessages.Where(chatMessageItem => chatMessageItem.ChatBubbleId == chatBubbleId).FirstOrDefault();
 
@@ -141,20 +173,124 @@ namespace clippydotnet
 
                     // Stream the reponse messageToken to the console
                     Console.Write(messageToken);
+
+                    */
+
                 });
 
                 await hubConnection.StartAsync();
-                Console.WriteLine("Query: What are you?");
-                await hubConnection.SendAsync("SendQuery", "What are you?", chatMessages);
+                //Console.WriteLine("Query: What are you?");
+                //await hubConnection.SendAsync("SendQuery", "What are you?", chatMessages);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error: {ex.Message}");
+            }
+        }
+
+        private static async Task RecognizeKeywordAsync()
+        {
+            var speechKey = Configuration["AzureSpeech:Key"];
+            var serviceRegion = Configuration["AzureSpeech:Region"];
+            var keywordModelPath = Configuration["AzureSpeech:KeywordModelPath"]; // Path to keyword model
+
+            var config = SpeechConfig.FromSubscription(speechKey, serviceRegion);
+            using var audioConfig = AudioConfig.FromDefaultMicrophoneInput();
+            using var keywordRecognizer = new KeywordRecognizer(audioConfig);
+
+            var keywordModel = KeywordRecognitionModel.FromFile(keywordModelPath);
+
+            Console.WriteLine("Listening for the keyword...");
+
+            var result = await keywordRecognizer.RecognizeOnceAsync(keywordModel);
+
+            if (result.Reason == ResultReason.RecognizedKeyword)
+            {
+                Console.WriteLine($"Recognized keyword: {result.Text}");
+                await RespondToKeywordAsync();
+            }
+            else
+            {
+                Console.WriteLine("Keyword not recognized. Listening again...");
+                await RecognizeKeywordAsync();
+            }
+        }
+
+        private static async Task RespondToKeywordAsync()
+        {
+            try
+            {
+                var speechKey = Configuration["AzureSpeech:Key"];
+                var serviceRegion = Configuration["AzureSpeech:Region"];
+
+                var config = SpeechConfig.FromSubscription(speechKey, serviceRegion);
+                config.SpeechSynthesisVoiceName = "en-US-GuyNeural";
+
+                using var synthesizer = new SpeechSynthesizer(config);
+                var responseText = "Ok, what would you like to chat about?";
+
+                Console.WriteLine(responseText);
+
+                await synthesizer.SpeakTextAsync(responseText);
+
+                await RecognizeSpeechAsync();
+
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Error: {ex.Message}");
             }
 
-            while (true)
+        }
+
+        private static async Task RecognizeSpeechAsync()
+        {
+            try
             {
-                // Keep the application running
+                var speechKey = Configuration["AzureSpeech:Key"];
+                var serviceRegion = Configuration["AzureSpeech:Region"];
+
+                var config = SpeechConfig.FromSubscription(speechKey, serviceRegion);
+                using var audioConfig = AudioConfig.FromDefaultMicrophoneInput();
+                using var recognizer = new SpeechRecognizer(config, audioConfig);
+
+                Console.WriteLine("Listening for user input...");
+                var result = await recognizer.RecognizeOnceAsync();
+
+                if (result.Reason == ResultReason.RecognizedSpeech)
+                {
+                    Console.WriteLine($"Recognized: {result.Text}");
+                    await hubConnection.SendAsync("SendQuery", result.Text, chatMessages);
+                }
+                else
+                {
+                    Console.WriteLine("Speech not recognized. Listening again...");
+                    await RecognizeSpeechAsync();
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error: {ex.Message}");
+            }
+        }
+
+        // Add this method to handle speech synthesis
+        private static async Task SpeakMessageAsync(string message)
+        {
+            try
+            {
+                var speechKey = Configuration["AzureSpeech:Key"];
+                var serviceRegion = Configuration["AzureSpeech:Region"];
+
+                var config = SpeechConfig.FromSubscription(speechKey, serviceRegion);
+                config.SpeechSynthesisVoiceName = "en-US-GuyNeural"; // You can change the voice as needed
+
+                using var synthesizer = new SpeechSynthesizer(config);
+                await synthesizer.SpeakTextAsync(message);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error: {ex.Message}");
             }
         }
 
